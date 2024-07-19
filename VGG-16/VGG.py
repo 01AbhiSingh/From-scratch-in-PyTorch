@@ -1,31 +1,62 @@
-from PIL import Image
-import numpy as np
-def calc_mean_RGB(train_data_path):
-  total_r = 0
-  total_g = 0
-  total_b = 0
-  pixel_count = 0
+import torch
+import torch.nn as nn
 
-  for filename in os.listdir(train_data_path):
-    if filename.endswith(".jpg",".png",".jpeg"):
-      img_path = os.path.join(train_data_path,filename)
-      with Image.open(img_path) as img:
-          img_array = np.array(img)
-          total_r +=np.sum(img_array[:,:,0])
-          total_g += np.sum(img_array[:,:,1])
-          total_b += np.sum(img_array[:,:,2])
-          pixel_count += img_array.shape[0]*img_array.shape[1]
+class VGG16(nn.Module):
+    def __init__(self, num_classes=1000):
+        super(VGG16, self).__init__()
+        self.features = nn.Sequential(
+            
+            
+            nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1),#in paper it is written conv3 which means conv2d with 3x3 kernel not a conv3d layer
+            nn.ReLU(inplace=True), #add relu after each conv layer, in paper relu not added in architecture for brevity
+            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1),  # Correction: Changed input channels from 3 to 64
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
 
-  mean_r = total_r/pixel_count
-  mean_g = total_g/pixel_count
-  mean_b = total_b/pixel_count
+            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
 
-  return mean_r, mean_g, mean_b
+            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
 
-# Usage
-dataset_path = '/content/sample_data/mnist_train_small.csv'
-mean_r, mean_g, mean_b = calc_mean_RGB(dataset_path)
+            nn.Conv2d(256, 512, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
 
-print(f"Mean R: {mean_r}")
-print(f"Mean G: {mean_g}")
-print(f"Mean B: {mean_b}")
+            nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(512, 512, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+        )
+        self.avgpool = nn.AdaptiveAvgPool2d((7,7))
+        self.classifier = nn.Sequential(
+            nn.Linear(512 * 7 * 7, 4096),
+            nn.ReLU(True),
+            nn.Dropout(),
+            nn.Linear(4096,4096),
+            nn.ReLU(True),
+            nn.Dropout(),
+            nn.Linear(4096, num_classes),
+
+        ) 
+        def forward(self, x):
+          x = self.features(x)
+          x = self.avgpool(x)
+          x = torch.flatten(x, 1)
+          x = self.classifier(x)
+          return x
