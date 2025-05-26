@@ -7,7 +7,7 @@ from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 import os
 import numpy as np
-import random # For setting seed
+import random 
 
 # --- Utility for setting seed ---
 def set_seed(seed):
@@ -18,7 +18,7 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-# --- NoiseScheduler (No changes needed, it's solid based on transcript) ---
+
 class NoiseScheduler(nn.Module):
     def __init__(self, start_beta=0.0001, end_beta=0.02, timesteps=1000):
         super().__init__()
@@ -46,7 +46,7 @@ class NoiseScheduler(nn.Module):
         x0_prediction = torch.clamp(x0_prediction, -1.0, 1.0)
 
         mean = (xt - self.betas[t].view(-1, 1, 1, 1) * noise_prediction / self.sqrt_one_minus_alphas_cumprod[t].view(-1, 1, 1, 1)) / \
-               self.alphas[t].sqrt().view(-1, 1, 1, 1) # Corrected: transcript uses sqrt(alpha_t) not sqrt(alpha_cumprod_t) here
+               self.alphas[t].sqrt().view(-1, 1, 1, 1)
 
         variance = self.posterior_variance[t].view(-1, 1, 1, 1)
 
@@ -57,7 +57,7 @@ class NoiseScheduler(nn.Module):
             xt_minus_1 = mean + torch.sqrt(variance) * z
             return xt_minus_1, x0_prediction
 
-# --- TimeEmbedding (No changes needed) ---
+
 class TimeEmbedding(nn.Module):
     def __init__(self, time_emb_dim):
         super().__init__()
@@ -78,7 +78,7 @@ class TimeEmbedding(nn.Module):
         emb = self.linear2(emb)
         return emb
 
-# --- ResnetBlock (No changes needed, already good) ---
+
 class ResnetBlock(nn.Module):
     def __init__(self, in_channels, out_channels, time_emb_dim, num_groups=32):
         super().__init__()
@@ -111,7 +111,7 @@ class ResnetBlock(nn.Module):
 
         return h + self.residual_conv(x)
 
-# --- SelfAttentionBlock (No changes needed, already good) ---
+
 class SelfAttentionBlock(nn.Module):
     def __init__(self, channels, num_heads=8):
         super().__init__()
@@ -126,7 +126,7 @@ class SelfAttentionBlock(nn.Module):
         h = h.transpose(1, 2).view(batch_size, channels, H, W)
         return x + h
 
-# --- DownBlock (Corrected Logic for multiple Resnet+Attention blocks) ---
+
 class DownBlock(nn.Module):
     def __init__(self, in_channels, out_channels, time_emb_dim, num_resnet_blocks=1, num_heads=8, downsample=True):
         super().__init__()
@@ -135,31 +135,29 @@ class DownBlock(nn.Module):
         for i in range(num_resnet_blocks):
             self.blocks.append(ResnetBlock(current_in_channels, out_channels, time_emb_dim))
             self.blocks.append(SelfAttentionBlock(out_channels, num_heads))
-            current_in_channels = out_channels # Subsequent blocks operate on out_channels
+            current_in_channels = out_channels 
 
         if downsample:
-            # Use Conv2d with stride 2 for downsampling
+            
             self.downsample_layer = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=2, padding=1)
         else:
             self.downsample_layer = nn.Identity()
 
     def forward(self, x, t_emb):
-        # Accumulate skip connections from each Resnet+Attention pair
-        # The transcript implies taking the output of the *last* block before downsampling
-        # as the skip connection.
-        skip_connection_output = None # Store the output that will be used as skip connection
+       
+        skip_connection_output = None 
         
         for block in self.blocks:
             if isinstance(block, ResnetBlock):
                 x = block(x, t_emb)
             else: # SelfAttentionBlock
                 x = block(x)
-            skip_connection_output = x # Update for the last output before downsampling
+            skip_connection_output = x 
         
         x = self.downsample_layer(x)
-        return x, skip_connection_output # Return the downsampled output and the skip connection
+        return x, skip_connection_output
         
-# --- MidBlock (No major changes needed, it's correct for its role) ---
+
 class MidBlock(nn.Module):
     def __init__(self, channels, time_emb_dim, num_resnet_blocks=1, num_heads=8):
         super().__init__()
@@ -179,49 +177,37 @@ class MidBlock(nn.Module):
                 x = block(x)
         return x
 
-# --- UpBlock (Corrected in_channels for first ResnetBlock and concatenation logic) ---
+
 class UpBlock(nn.Module):
     def __init__(self, in_channels, out_channels, time_emb_dim, num_resnet_blocks=1, num_heads=8, upsample=True):
         super().__init__()
-        # in_channels for ConvTranspose2d is the current input channels (from previous block or mid-block)
-        # out_channels is still in_channels for the ConvTranspose2d, as it maintains feature count, just increases spatial size
+       
         self.upsample_layer = nn.ConvTranspose2d(in_channels, in_channels, kernel_size=4, stride=2, padding=1) if upsample else nn.Identity()
         
         self.blocks = nn.ModuleList()
-        # The first ResnetBlock in UpBlock processes `in_channels + skip_channels`
-        # Subsequent blocks process `out_channels`
-        
-        # After upsampling and concatenation, input to the first resnet block will be in_channels (from upsample) + out_channels (from skip)
+       
         self.blocks.append(ResnetBlock(in_channels + out_channels, out_channels, time_emb_dim)) 
         self.blocks.append(SelfAttentionBlock(out_channels, num_heads))
 
-        for i in range(num_resnet_blocks - 1): # If num_resnet_blocks is 1, this loop won't run.
+        for i in range(num_resnet_blocks - 1): 
             self.blocks.append(ResnetBlock(out_channels, out_channels, time_emb_dim))
             self.blocks.append(SelfAttentionBlock(out_channels, num_heads))
 
     def forward(self, x, skip_connection, t_emb):
         x = self.upsample_layer(x)
         
-        # Ensure dimensions match before concatenation if upsampling created different sizes due to padding
-        # This can be common. For example, if a 28x28 image was downsampled to 7x7 and then upsampled,
-        # it might not perfectly match 28x28 again depending on padding/kernel sizes.
-        # A simple crop or padding might be needed. For a stride=2, kernel=4, padding=1, it should often work out.
         if x.shape[-2:] != skip_connection.shape[-2:]:
-            # If spatial dimensions don't match, resize 'x' to match 'skip_connection'
-            # This is a common practical adjustment, often using F.interpolate or cropping.
-            # Here, we'll try to center crop for simplicity if needed.
             target_h, target_w = skip_connection.shape[-2:]
             x_h, x_w = x.shape[-2:]
             
-            # Simple centering logic
             diff_h = x_h - target_h
             diff_w = x_w - target_w
             
             if diff_h > 0 or diff_w > 0:
-                # Crop x
+
                 x = x[:, :, diff_h//2 : x_h - diff_h//2, diff_w//2 : x_w - diff_w//2]
             elif diff_h < 0 or diff_w < 0:
-                # Pad x
+
                 padding_h = (abs(diff_h)//2, abs(diff_h) - abs(diff_h)//2)
                 padding_w = (abs(diff_w)//2, abs(diff_w) - abs(diff_w)//2)
                 x = F.pad(x, (padding_w[0], padding_w[1], padding_h[0], padding_h[1]))
@@ -236,7 +222,7 @@ class UpBlock(nn.Module):
                 x = block(x)
         return x
 
-# --- Unet (Corrected channel logic for down/up blocks, more robust skip connection handling) ---
+
 class Unet(nn.Module):
     def __init__(self, in_channels=1, out_channels=1, time_emb_dim=256,
                  down_channels=[64, 128, 256], mid_channels=[256],
@@ -255,26 +241,15 @@ class Unet(nn.Module):
             downsample = True if i < len(down_channels) - 1 else False
             self.down_blocks.append(DownBlock(in_c, out_c, time_emb_dim, num_resnet_blocks, num_heads, downsample))
 
-        # Mid block
-        # Mid_channels[0] will be the last channel of the last down block
         self.mid_block = MidBlock(down_channels[-1], time_emb_dim, num_resnet_blocks, num_heads)
 
-        # Up blocks
         self.up_blocks = nn.ModuleList()
         for i in range(len(up_channels)):
-            # The input channels to the upsampling layer
-            # If it's the first up block, input comes from mid_block (down_channels[-1])
-            # Otherwise, it comes from the previous up_block's output.
             in_c_upsample = down_channels[-1] if i == 0 else up_channels[i-1]
             
-            # out_c is the output channel of this up block's internal resnet/attention blocks
             out_c = up_channels[i]
             
-            # Determine if this up block should upsample
-            # Only upsample if we are not at the final resolution already
-            # And also, the last up_channel should match the target output of the network
-            upsample = True if i < len(up_channels) -1 else False # This logic depends on the desired final resolution vs. input.
-                                                                    # Typically, you upsample until you reach image resolution.
+            upsample = True if i < len(up_channels) -1 else False 
 
             self.up_blocks.append(UpBlock(in_c_upsample, out_c, time_emb_dim, num_resnet_blocks, num_heads, upsample))
 
@@ -291,17 +266,11 @@ class Unet(nn.Module):
         skip_connections = []
         for down_block in self.down_blocks:
             x, skip_conn_output = down_block(x, t_emb)
-            skip_connections.append(skip_conn_output) # Collect the skip connection from each down block
+            skip_connections.append(skip_conn_output) 
 
         x = self.mid_block(x, t_emb)
 
-        # Up blocks
-        # Iterate over up_blocks and corresponding skip connections in reverse
-        # skip_connections are gathered from shallowest to deepest, so reverse them for up_blocks
         for i, up_block in enumerate(self.up_blocks):
-            # The skip connection for the current up_block comes from the corresponding
-            # down_block at the same resolution level.
-            # Example: up_block 0 takes skip from down_block (last), up_block 1 takes skip from down_block (second to last)
             skip_idx = len(skip_connections) - 1 - i
             skip_conn = skip_connections[skip_idx]
             x = up_block(x, skip_conn, t_emb)
@@ -311,7 +280,7 @@ class Unet(nn.Module):
         x = self.conv_out(x)
         return x
 
-# --- Dataset and Training (Add set_seed, otherwise good) ---
+
 class CustomImageDataset(Dataset):
     def __init__(self, img_dir, transform=None):
         self.img_dir = img_dir
@@ -357,7 +326,6 @@ def train_ddpm(model, scheduler, dataloader, optimizer, num_epochs, device):
             if (i + 1) % 100 == 0:
                 print(f"Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(dataloader)}], Loss: {loss.item():.4f}")
 
-# --- Sampling (Add set_seed, otherwise good) ---
 def sample_ddpm(model, scheduler, num_samples, img_size, channels, device):
     model.eval()
     with torch.no_grad():
@@ -376,10 +344,9 @@ def sample_ddpm(model, scheduler, num_samples, img_size, channels, device):
         generated_images = (xt.clamp(-1., 1.) + 1) * 0.5 
         return generated_images
 
-# --- Example Usage (Add set_seed) ---
-if __name__ == "__main__":
-    set_seed(42) # Set a seed for reproducibility
 
+if __name__ == "__main__":
+    set_seed(42) 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
@@ -389,7 +356,7 @@ if __name__ == "__main__":
     DOWN_CHANNELS = [64, 128, 256, 512]
     MID_CHANNELS = [512] # This should usually match the last down_channel value
     UP_CHANNELS = [512, 256, 128, 64] # Reversed order of down_channels for upsampling
-    NUM_RESNET_BLOCKS = 1 # Keep as 1 for simpler case as per transcript initially
+    NUM_RESNET_BLOCKS = 1 
     NUM_HEADS = 8
     TIMESTEPS = 1000
     START_BETA = 0.0001
